@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Register for Web Push</title>
+</head>
+<body style="font-family:system-ui; padding:24px;">
+  <h2>Web Push Registration</h2>
+  <p>Click the button to allow notifications and register this browser.</p>
+  <button id="btn">Register this browser</button>
+  <pre id="out" style="white-space:pre-wrap; background:#111; color:#0f0; padding:12px; margin-top:16px;"></pre>
+
+  <script type="module">
+    // 1️⃣ Paste your Firebase Web config here later (step 5)
+    const firebaseConfig = {
+      apiKey: "PASTE_YOUR_FIREBASE_API_KEY",
+      authDomain: "PASTE.firebaseapp.com",
+      projectId: "PASTE",
+      storageBucket: "PASTE.appspot.com",
+      messagingSenderId: "PASTE_SENDER_ID",
+      appId: "PASTE_FIREBASE_APP_ID",
+    };
+
+    // 2️⃣ Paste your Web Push certificate key (VAPID public key) here later
+    const VAPID_KEY = "PASTE_YOUR_VAPID_PUBLIC_KEY";
+
+    const out = (s)=>{ document.getElementById("out").textContent += s + "\n"; };
+    const btn = document.getElementById("btn");
+
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+    import { getMessaging, getToken, isSupported } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-messaging.js";
+
+    const app = initializeApp(firebaseConfig);
+
+    btn.onclick = async ()=>{
+      try{
+        if(!(await isSupported())) { out("Web push not supported in this browser."); return; }
+        const messaging = getMessaging(app);
+
+        const permission = await Notification.requestPermission();
+        out("Permission: " + permission);
+        if(permission !== "granted") return;
+
+        const token = await getToken(messaging, { vapidKey: VAPID_KEY });
+        out("WEB FCM TOKEN:\n" + token);
+
+        // send to backend register-token
+        const resp = await fetch("/register-token", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ token, label: "Laptop_Browser" })
+        });
+        out("Backend: " + resp.status + " " + (await resp.text()));
+      }catch(e){ out("Error: " + (e?.message||e)); }
+    };
+  </script>
+</body>
+</html>
