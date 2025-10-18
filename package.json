@@ -1,12 +1,20 @@
 {
-  "name": "solana-signal-watcher",
+  "name": "solana-signal",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Solana Signal Watcher (Raydium/Orca tight parsing with Firebase alerts)",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "body-parser": "^1.20.2",
     "express": "^4.18.2",
-    "firebase-admin": "^11.11.1"
-  }
+    "firebase-admin": "^11.11.1",
+    "body-parser": "^1.20.2",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "license": "MIT"
 }
