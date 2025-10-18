@@ -1,49 +1,52 @@
-// server.js
+// --- server.js ---
+// ✅ Imports
 import express from "express";
 import admin from "firebase-admin";
-import { readFileSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
+// ✅ Setup
 const app = express();
 app.use(express.json());
+const port = process.env.PORT || 3000;
 
-const PORT = process.env.PORT || 3000;
+// ✅ Resolve file paths
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ✅ Load the Firebase Admin SDK key from Render’s secret file
-const serviceAccountPath = "/etc/secrets/solanasignal-51547-firebase-adminsdk-fbsvc-76bfa673ed.json";
-
-let serviceAccount;
-try {
-  const fileContent = readFileSync(serviceAccountPath, "utf8");
-  serviceAccount = JSON.parse(fileContent);
-  console.log("✅ Firebase key loaded successfully");
-} catch (err) {
-  console.error("❌ Error reading Firebase key file:", err.message);
-}
+// ✅ Load Firebase credentials
+const serviceAccountPath =
+  process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+  "/etc/secrets/solanasignal-51547-firebase-adminsdk-fbsvc-76bfa673ed.json";
 
 // ✅ Initialize Firebase Admin
 try {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+  const serviceAccount = await import(serviceAccountPath, {
+    assert: { type: "json" },
   });
-  console.log("🔥 Firebase Admin initialized successfully");
-} catch (err) {
-  console.error("❌ Firebase initialization failed:", err.message);
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount.default || serviceAccount),
+  });
+
+  console.log("✅ Firebase Admin initialized successfully");
+} catch (error) {
+  console.error("❌ Error initializing Firebase Admin:", error);
 }
 
-// ✅ Default route to confirm server is working
+// ✅ Root test route
 app.get("/", (req, res) => {
   res.json({ ok: true, msg: "🔥 Solana Signal backend connected to Firebase!" });
 });
 
-// ✅ Endpoint to send push notifications
+// ✅ Send notification route
 app.post("/send", async (req, res) => {
   try {
     const { token, title, body } = req.body;
-
     if (!token || !title || !body) {
       return res.status(400).json({
         ok: false,
-        msg: "Missing required fields: token, title, or body",
+        msg: "Missing required fields: token, title, body",
       });
     }
 
@@ -53,16 +56,19 @@ app.post("/send", async (req, res) => {
     };
 
     const response = await admin.messaging().send(message);
+    console.log("📨 Message sent:", response);
+
     res.json({ ok: true, msg: "Notification sent!", id: response });
-  } catch (err) {
-    console.error("❌ FCM send error:", err);
-    res.status(500).json({ ok: false, msg: err.message });
+  } catch (error) {
+    console.error("❌ Error sending message:", error);
+    res.status(500).json({ ok: false, msg: error.message });
   }
 });
 
 // ✅ Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
 });
+
 
 
