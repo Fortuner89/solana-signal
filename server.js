@@ -19,14 +19,15 @@ const serviceAccountPath =
   process.env.GOOGLE_APPLICATION_CREDENTIALS ||
   "/etc/secrets/solanasignal-51547-firebase-adminsdk-fbsvc-76bfa673ed.json";
 
-// ✅ Initialize Firebase Admin
+// ✅ Initialize Firebase Admin (universal version)
+import fs from "fs";
+
 try {
-  const serviceAccount = await import(serviceAccountPath, {
-    assert: { type: "json" },
-  });
+  const rawData = fs.readFileSync(serviceAccountPath, "utf8");
+  const serviceAccount = JSON.parse(rawData);
 
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount.default || serviceAccount),
+    credential: admin.credential.cert(serviceAccount),
   });
 
   console.log("✅ Firebase Admin initialized successfully");
@@ -69,6 +70,7 @@ app.post("/send", async (req, res) => {
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });
+
 
 
 
