@@ -1,27 +1,28 @@
-// --- server.js ---
-// ✅ Imports
+// -----------------------------
+// ✅ SOLANA SIGNAL BACKEND
+// -----------------------------
 import express from "express";
 import admin from "firebase-admin";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 
-// ✅ Setup
 const app = express();
-app.use(express.json());
 const port = process.env.PORT || 3000;
 
-// ✅ Resolve file paths
+// Middleware to parse JSON
+app.use(express.json());
+
+// This converts ES module URL to file path
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ Load Firebase credentials
+// Firebase secret path on Render
 const serviceAccountPath =
   process.env.GOOGLE_APPLICATION_CREDENTIALS ||
   "/etc/secrets/solanasignal-51547-firebase-adminsdk-fbsvc-76bfa673ed.json";
 
-// ✅ Initialize Firebase Admin (universal version)
-import fs from "fs";
-
+// ✅ Initialize Firebase Admin
 try {
   const rawData = fs.readFileSync(serviceAccountPath, "utf8");
   const serviceAccount = JSON.parse(rawData);
@@ -35,25 +36,27 @@ try {
   console.error("❌ Error initializing Firebase Admin:", error);
 }
 
-// ✅ Root test route
+// ✅ Default root endpoint
 app.get("/", (req, res) => {
   res.json({ ok: true, msg: "🔥 Solana Signal backend connected to Firebase!" });
 });
 
-// ✅ Send notification route
+// ✅ POST /send endpoint
 app.post("/send", async (req, res) => {
   try {
     const { token, title, body } = req.body;
     if (!token || !title || !body) {
-      return res.status(400).json({
-        ok: false,
-        msg: "Missing required fields: token, title, body",
-      });
+      return res
+        .status(400)
+        .json({ ok: false, msg: "Missing token, title, or body" });
     }
 
     const message = {
-      notification: { title, body },
       token,
+      notification: {
+        title,
+        body,
+      },
     };
 
     const response = await admin.messaging().send(message);
@@ -70,6 +73,7 @@ app.post("/send", async (req, res) => {
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });
+
 
 
 
