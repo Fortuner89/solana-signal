@@ -1,5 +1,5 @@
 // -----------------------------
-// ✅ SOLANA SIGNAL BACKEND
+// ✅ SOLANA SIGNAL BACKEND FINAL
 // -----------------------------
 import express from "express";
 import admin from "firebase-admin";
@@ -10,14 +10,14 @@ import { fileURLToPath } from "url";
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware to parse JSON
+// Middleware to parse JSON bodies
 app.use(express.json());
 
-// This converts ES module URL to file path
+// Convert ES module URL to file path
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Firebase secret path on Render
+// Firebase secret file path (Render or local)
 const serviceAccountPath =
   process.env.GOOGLE_APPLICATION_CREDENTIALS ||
   "/etc/secrets/solanasignal-51547-firebase-adminsdk-fbsvc-76bfa673ed.json";
@@ -36,27 +36,26 @@ try {
   console.error("❌ Error initializing Firebase Admin:", error);
 }
 
-// ✅ Default root endpoint
+// ✅ Root check endpoint
 app.get("/", (req, res) => {
   res.json({ ok: true, msg: "🔥 Solana Signal backend connected to Firebase!" });
 });
 
-// ✅ POST /send endpoint
+// ✅ POST /send — send push notification
 app.post("/send", async (req, res) => {
   try {
     const { token, title, body } = req.body;
+
     if (!token || !title || !body) {
-      return res
-        .status(400)
-        .json({ ok: false, msg: "Missing token, title, or body" });
+      return res.status(400).json({
+        ok: false,
+        msg: "Missing token, title, or body in request",
+      });
     }
 
     const message = {
       token,
-      notification: {
-        title,
-        body,
-      },
+      notification: { title, body },
     };
 
     const response = await admin.messaging().send(message);
@@ -69,10 +68,11 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// ✅ Start server
+// ✅ Start the server
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });
+
 
 
 
