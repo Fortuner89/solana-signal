@@ -1,7 +1,7 @@
 {
   "name": "solana-signal",
   "version": "1.0.0",
-  "description": "Solana Signal Watcher (Render-safe, tight parsing v4)",
+  "description": "Solana Signal Watcher (Render-safe, tight parsing v4/v5)",
   "main": "server.js",
   "type": "module",
   "scripts": {

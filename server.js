@@ -1,10 +1,10 @@
 // ------------------------------------------------------------
-// Solana Signal Backend v4 (Render free-tier safe)
-// - Firebase admin (resilient init)
-// - Raydium/Orca poller with browser headers + timeouts
-// - Limited streaming (first N KB) to avoid 512MB crashes
-// - In-memory pool cache + status endpoints
-// - FCM token registration + test push endpoint
+// Solana Signal Backend v5  (Render-safe, Win-Rate MVP)
+// - Firebase admin (resilient)
+// - Raydium/Orca tight parsing (memory-safe)
+// - Helius-based wallet watcher (lightweight polling)
+// - Win-rate = survived >= WIN_MINUTES and at least 2 swaps for token
+// - All endpoints return JSON 200 (no 502), diagnostic-friendly
 // ------------------------------------------------------------
 
 import express from "express";
@@ -15,12 +15,19 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 // ------------------------------
-// Basic config (tweakable)
+// Config (adjustable via Render → Environment variables)
 // ------------------------------
-const PORT = process.env.PORT || 10000;
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 90_000); // 90s
-const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 5_000);   // 5s
-const MAX_BYTES = Number(process.env.MAX_BYTES || 250_000);               // 250 KB per source
+const PORT = Number(process.env.PORT || 10000);
+
+// Raydium/Orca polling (Render-safe)
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 90_000);
+const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 5_000);
+const MAX_BYTES = Number(process.env.MAX_BYTES || 250_000);
+
+// Wallet watcher (Helius)
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY || ""; // set in Render Environment
+const WALLET_POLL_MS = Number(process.env.WALLET_POLL_MS || 120_000);
+const WIN_MINUTES = Number(process.env.WIN_MINUTES || 5); // adjustable (5/10/15 etc.)
 
 // ------------------------------
 // ESM helper
@@ -47,10 +54,10 @@ function initFirebase() {
   if (fs.existsSync(credPath)) {
     try {
       admin.initializeApp({ credential: admin.credential.cert(credPath) });
-      console.log("✅ Firebase Admin initialized (service account file)");
+      console.log("✅ Firebase Admin initialized (service account)");
       return;
     } catch (e2) {
-      console.error("❌ Service-account init failed:", e2.message);
+      console.error("❌ service-account init failed:", e2.message);
     }
   } else {
     console.warn("⚠️ No GOOGLE_APPLICATION_CREDENTIALS file found; continuing without Firebase Admin");
@@ -61,18 +68,18 @@ initFirebase();
 const db = admin.apps.length ? admin.firestore() : null;
 
 // ------------------------------
-// Express server
+// Express server + JSON
 // ------------------------------
 const app = express();
 app.use(express.json());
 
-// Health
+// Root health
 app.get("/", (_req, res) => {
-  res.json({ ok: true, msg: "🔥 Solana Signal Watcher (Raydium/Orca tight parsing v4)" });
+  res.json({ ok: true, msg: "🔥 Solana Signal Watcher (Raydium/Orca tight parsing v5)" });
 });
 
 // ------------------------------
-// Memory-safe fetch (limit bytes + timeout + browser headers)
+// Safe fetch (timeout + byte limit + browser headers)
 // ------------------------------
 async function fetchLimited(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_BYTES } = {}) {
   const headers = {
@@ -86,22 +93,16 @@ async function fetchLimited(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_
 
   try {
     const res = await fetch(url, { headers, signal: controller.signal });
-    // node-fetch stream (Node Readable)
     const chunks = [];
     let total = 0;
-
-    const reader = res.body;
     return await new Promise((resolve, reject) => {
-      reader.on("data", (chunk) => {
+      res.body.on("data", (chunk) => {
         chunks.push(chunk);
         total += chunk.length;
-        if (total >= maxBytes) {
-          // Stop reading more to save memory
-          reader.destroy();
-        }
+        if (total >= maxBytes) res.body.destroy();
       });
-      reader.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      reader.on("error", reject);
+      res.body.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      res.body.on("error", reject);
     });
   } catch (err) {
     return `__ERROR__${String(err)}`;
@@ -110,128 +111,270 @@ async function fetchLimited(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_
   }
 }
 
-// ------------------------------
-// Quick parser: extract up to N "addresses"
-// (base58-ish addresses 32-44 chars). Not perfect, but safe & light.
-// ------------------------------
-function extractAddressesLimited(text, { limit = 50 } = {}) {
+// Extract “addresses” (base58-ish 32–44 chars) from limited text
+function extractAddressesLimited(text, { limit = 40 } = {}) {
   if (!text || text.startsWith("__ERROR__")) return [];
-  const results = new Set();
-  const regex = /"(?:(?:poolId|address|mint|tokenMint|liquidity|pool|pools)?"?\s*:\s*")?([A-HJ-NP-Za-km-z1-9]{32,44})"/g;
+  const s = new Set();
+  const rgx = /"(?:(?:poolId|address|mint|tokenMint|liquidity|pool|pools)?"?\s*:\s*")?([A-HJ-NP-Za-km-z1-9]{32,44})"/g;
   let m;
-  while ((m = regex.exec(text)) && results.size < limit) {
-    const val = m[1];
-    if (val && val.length >= 32 && val.length <= 44) results.add(val);
+  while ((m = rgx.exec(text)) && s.size < limit) {
+    if (m[1]) s.add(m[1]);
   }
-  return Array.from(results);
+  return Array.from(s);
 }
 
-// ------------------------------------------------------------
-// In-memory cache of detected pools (very light)
-// ------------------------------------------------------------
-const state = {
-  tokens: new Map(), // key: address -> { firstSeen: Date, lastSeen: Date, source: 'raydium'|'orca' }
-  sources: {
-    raydium: "https://api.raydium.io/pairs",
-    orca: "https://api.mainnet.orca.so/allPools",
-  },
+// ------------------------------
+// Raydium/Orca in-memory “pair cache”
+// ------------------------------
+const sources = {
+  raydium: "https://api.raydium.io/pairs",
+  orca: "https://api.mainnet.orca.so/allPools",
+};
+const pairCache = {
+  tokens: new Map(), // key: address
   lastPoll: null,
 };
 
-function upsertToken(address, source) {
+function upsertPair(addr, source) {
   const now = new Date();
-  const t = state.tokens.get(address);
-  if (t) {
-    t.lastSeen = now;
-  } else {
-    state.tokens.set(address, { address, source, firstSeen: now, lastSeen: now });
-  }
+  const cur = pairCache.tokens.get(addr);
+  if (cur) cur.lastSeen = now;
+  else pairCache.tokens.set(addr, { address: addr, source, firstSeen: now, lastSeen: now });
 }
 
-// ------------------------------------------------------------
-// Poll both sources (memory-light). Runs on interval.
-// ------------------------------------------------------------
-async function pollSources() {
-  console.log("🔎 Polling Raydium/Orca (summary mode)...");
-  state.lastPoll = new Date();
+async function pollPairs() {
+  console.log("🔎 Polling pairs (Render-safe)…");
+  pairCache.lastPoll = new Date();
 
-  // Fetch limited texts
-  const [rayText, orcaText] = await Promise.all([
-    fetchLimited(state.sources.raydium).catch((e) => `__ERROR__${e}`),
-    fetchLimited(state.sources.orca).catch((e) => `__ERROR__${e}`),
+  const [ray, orc] = await Promise.all([
+    fetchLimited(sources.raydium).catch((e) => `__ERROR__${e}`),
+    fetchLimited(sources.orca).catch((e) => `__ERROR__${e}`),
   ]);
 
-  // Extract limited addresses
-  const rayAddrs = extractAddressesLimited(rayText, { limit: 30 });
-  const orcaAddrs = extractAddressesLimited(orcaText, { limit: 30 });
+  const rayAddrs = extractAddressesLimited(ray, { limit: 40 });
+  const orcAddrs = extractAddressesLimited(orc, { limit: 40 });
 
-  rayAddrs.forEach((addr) => upsertToken(addr, "raydium"));
-  orcaAddrs.forEach((addr) => upsertToken(addr, "orca"));
+  rayAddrs.forEach((a) => upsertPair(a, "raydium"));
+  orcAddrs.forEach((a) => upsertPair(a, "orca"));
 
   console.log(
-    `✅ Poll complete. Added/updated Raydium: ${rayAddrs.length}, Orca: ${orcaAddrs.length}, total cached: ${state.tokens.size}`
+    `✅ Pairs poll complete | Raydium: ${rayAddrs.length}, Orca: ${orcAddrs.length}, cache size: ${pairCache.tokens.size}`
   );
 }
 
-// start poller
-setInterval(pollSources, POLL_INTERVAL_MS);
-setTimeout(pollSources, 2_000); // initial poll after boot
+setInterval(pollPairs, POLL_INTERVAL_MS);
+setTimeout(pollPairs, 2_000);
 
-// ------------------------------------------------------------
-// Public endpoint: liquidity-check (shows diagnostics)
-// ------------------------------------------------------------
+// Diagnostics
 app.get("/liquidity-check", async (_req, res) => {
-  console.log("🧠 Running liquidity-check (summary mode)");
-  // One short fetch each, but does not block poller
+  console.log("🧠 liquidity-check (summary)");
   const [ray, orc] = await Promise.allSettled([
-    fetchLimited(state.sources.raydium),
-    fetchLimited(state.sources.orca),
+    fetchLimited(sources.raydium, { timeoutMs: 4000, maxBytes: 150_000 }),
+    fetchLimited(sources.orca, { timeoutMs: 4000, maxBytes: 150_000 }),
   ]);
 
-  const rayOk = ray.status === "fulfilled" && !String(ray.value).startsWith("__ERROR__");
-  const orcOk = orc.status === "fulfilled" && !String(orc.value).startsWith("__ERROR__");
-
-  res.json({
+  const resp = {
     ok: true,
     msg: "Liquidity check (summary mode)",
-    raydium: rayOk ? { ok: true, truncated: true } : { ok: false, error: String(ray.value).replace("__ERROR__", "") },
-    orca: orcOk ? { ok: true, truncated: true } : { ok: false, error: String(orc.value).replace("__ERROR__", "") },
+    raydium:
+      ray.status === "fulfilled" && !String(ray.value).startsWith("__ERROR__")
+        ? { ok: true, truncated: true }
+        : { ok: false, error: String(ray.value).replace("__ERROR__", "") },
+    orca:
+      orc.status === "fulfilled" && !String(orc.value).startsWith("__ERROR__")
+        ? { ok: true, truncated: true }
+        : { ok: false, error: String(orc.value).replace("__ERROR__", "") },
     cache: {
-      tokenCount: state.tokens.size,
-      lastPoll: state.lastPoll ? state.lastPoll.toISOString() : null,
+      tokenCount: pairCache.tokens.size,
+      lastPoll: pairCache.lastPoll ? pairCache.lastPoll.toISOString() : null,
     },
-  });
+  };
+
+  return res.json(resp);
 });
 
-// ------------------------------------------------------------
-// Public endpoint: watcher status (cached tokens preview)
-// ------------------------------------------------------------
 app.get("/watch/status", (_req, res) => {
-  const sample = Array.from(state.tokens.values()).slice(0, 10).map((t) => ({
-    address: t.address,
-    source: t.source,
-    firstSeen: t.firstSeen.toISOString(),
-    lastSeen: t.lastSeen.toISOString(),
-  }));
-
+  const sample = Array.from(pairCache.tokens.values())
+    .slice(0, 10)
+    .map((t) => ({
+      address: t.address,
+      source: t.source,
+      firstSeen: t.firstSeen.toISOString(),
+      lastSeen: t.lastSeen.toISOString(),
+    }));
   res.json({
     ok: true,
-    msg: "Watcher status",
-    cachedTokens: state.tokens.size,
-    lastPoll: state.lastPoll ? state.lastPoll.toISOString() : null,
+    cachedTokens: pairCache.tokens.size,
+    lastPoll: pairCache.lastPoll ? pairCache.lastPoll.toISOString() : null,
     sample,
   });
 });
 
-// ------------------------------------------------------------
-// FCM token registration + test push
-// ------------------------------------------------------------
+// ------------------------------
+// Phase 5: Wallet Win-Rate MVP (Helius)
+// ------------------------------
+// - Tracks wallets you add.
+// - Polls last N txs using Helius (light).
+// - For each token mint seen in SWAP tx, record firstSeen.
+// - Mark "win" if we see >= 2 swap tx for same mint AND it has survived >= WIN_MINUTES.
+//   (This is a safe MVP; later we’ll replace with price/ROI logic.)
+//
+// Environment: HELIUS_API_KEY (set in Render → Environment)
+
+const wallets = new Map(); // key: wallet -> { label, trades: Map(tokenMint -> TradeInfo) }
+const WIN_MS = WIN_MINUTES * 60_000;
+
+function getWalletInfo(address) {
+  if (!wallets.has(address)) wallets.set(address, { label: null, trades: new Map() });
+  return wallets.get(address);
+}
+
+// Add a wallet to watch
+app.post("/wallets/add", async (req, res) => {
+  try {
+    const { address, label } = req.body || {};
+    if (!address) return res.status(400).json({ ok: false, msg: "address required" });
+    const info = getWalletInfo(address);
+    if (label) info.label = label;
+    return res.json({ ok: true, msg: "wallet added", address, label: info.label });
+  } catch (e) {
+    return res.status(500).json({ ok: false, msg: e.message });
+  }
+});
+
+// Remove a wallet
+app.post("/wallets/remove", (req, res) => {
+  const { address } = req.body || {};
+  if (!address) return res.status(400).json({ ok: false, msg: "address required" });
+  wallets.delete(address);
+  return res.json({ ok: true, msg: "removed", address });
+});
+
+// List wallets
+app.get("/wallets/list", (_req, res) => {
+  const list = Array.from(wallets.entries()).map(([address, v]) => ({
+    address,
+    label: v.label || null,
+    tokens: v.trades.size,
+  }));
+  return res.json({ ok: true, wallets: list });
+});
+
+// Wallet stats (win-rate)
+app.get("/wallets/stats", (_req, res) => {
+  const now = Date.now();
+  const details = [];
+  let totalWins = 0;
+  let total = 0;
+
+  wallets.forEach((w, address) => {
+    let wins = 0;
+    let count = 0;
+    const tokens = [];
+
+    w.trades.forEach((t, mint) => {
+      count++;
+      const aliveForMs = now - t.firstSeen.getTime();
+      const survived = aliveForMs >= WIN_MS;
+      const multiSwaps = t.swapCount >= 2;
+      const isWin = survived && multiSwaps;
+      if (isWin) wins++;
+      tokens.push({
+        mint,
+        firstSeen: t.firstSeen.toISOString(),
+        swapCount: t.swapCount,
+        survivedMin: Math.floor(aliveForMs / 60000),
+        win: isWin,
+      });
+    });
+
+    totalWins += wins;
+    total += count;
+    const wr = count ? Math.round((wins / count) * 100) : 0;
+
+    details.push({
+      address,
+      label: w.label || null,
+      tokens: count,
+      wins,
+      winRate: wr,
+      tokensDetail: tokens.slice(0, 10), // limit for output
+    });
+  });
+
+  const globalWR = total ? Math.round((totalWins / total) * 100) : 0;
+
+  return res.json({
+    ok: true,
+    winMinutes: WIN_MINUTES,
+    global: { tokens: total, wins: totalWins, winRate: globalWR },
+    wallets: details,
+  });
+});
+
+// Poll Helius for all watched wallets
+async function pollWallets() {
+  if (!HELIUS_API_KEY) {
+    console.warn("⚠️ HELIUS_API_KEY not set; wallet watcher idle");
+    return;
+  }
+
+  const promises = [];
+  wallets.forEach((_v, address) => {
+    promises.push(fetchWalletSwaps(address).catch((e) => console.warn("wallet fetch fail:", address, e.message)));
+  });
+  await Promise.allSettled(promises);
+}
+
+// Get last transactions from Helius and update local trades
+async function fetchWalletSwaps(address) {
+  const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${HELIUS_API_KEY}&limit=50`;
+  const res = await fetch(url);
+  const data = await res.json();
+
+  const info = getWalletInfo(address);
+
+  for (const tx of data || []) {
+    // Helius tx has "type" or "description" classification; keep it broad
+    const desc = tx?.description || tx?.type || "";
+    if (!/swap|amm|raydium|orca/i.test(desc)) continue;
+
+    // Try to derive token mint(s) from pre/post token balances
+    const mints = new Set();
+    (tx?.tokenTransfers || []).forEach((tr) => {
+      if (tr?.mint) mints.add(tr.mint);
+    });
+
+    if (mints.size === 0) continue;
+
+    mints.forEach((mint) => {
+      const t = info.trades.get(mint);
+      if (!t) {
+        info.trades.set(mint, {
+          mint,
+          firstSeen: new Date(tx.timestamp * 1000),
+          swapCount: 1,
+        });
+      } else {
+        // increment swap count if we see the same mint again
+        t.swapCount++;
+      }
+    });
+  }
+}
+
+// run poller
+setInterval(pollWallets, WALLET_POLL_MS);
+setTimeout(pollWallets, 5_000);
+
+// ------------------------------
+// Firebase device token save + test broadcast
+// ------------------------------
 app.post("/register-token", async (req, res) => {
   try {
     const { token, label } = req.body || {};
     if (!token) return res.status(400).json({ ok: false, msg: "token required" });
-    if (!db) return res.json({ ok: true, msg: "Saved (no Firestore available)" });
-
+    if (!db) return res.json({ ok: true, msg: "Saved locally (no Firestore available)" });
     await db.collection("device_tokens").doc(token).set(
       { label: label || null, createdAt: new Date() },
       { merge: true }
@@ -244,12 +387,10 @@ app.post("/register-token", async (req, res) => {
 
 async function notifyAll({ title, body, data = {} }) {
   if (!admin?.messaging || !db) return;
-
   const snap = await db.collection("device_tokens").get();
   const tokens = [];
   snap.forEach((d) => tokens.push(d.id));
   if (!tokens.length) return;
-
   const resp = await admin.messaging().sendMulticast({
     notification: { title, body },
     data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
@@ -262,7 +403,7 @@ app.post("/notify/test", async (_req, res) => {
   try {
     await notifyAll({
       title: "SolanaSignal Test 🔔",
-      body: "Backend is live — you will receive live wallet alerts here.",
+      body: "Backend is live — wallet watcher is running.",
     });
     res.json({ ok: true, msg: "Notification broadcast attempted" });
   } catch (e) {
@@ -270,14 +411,14 @@ app.post("/notify/test", async (_req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// Start server
-// ------------------------------------------------------------
+// ------------------------------
+// Start Server
+// ------------------------------
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log("🔥 Solana Signal Watcher (Raydium/Orca tight parsing v4)");
+  console.log("🔥 Solana Signal Watcher (Raydium/Orca tight parsing v5 + win-rate MVP)");
 });
 
-// Avoid hard crashes
+// Prevent hard crashes on free-tier
 process.on("unhandledRejection", (r) => console.error("⚠️ Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => console.error("⚠️ Uncaught Exception:", e));
