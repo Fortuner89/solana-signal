@@ -1,7 +1,7 @@
 {
   "name": "solana-signal",
   "version": "1.0.0",
-  "description": "Solana Signal Watcher (Raydium/Orca tight parsing with Firebase alerts)",
+  "description": "Solana Signal Watcher (Render-safe, tight parsing v4)",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,7 +10,6 @@
   "dependencies": {
     "express": "^4.18.2",
     "firebase-admin": "^11.11.1",
-    "body-parser": "^1.20.2",
     "node-fetch": "^3.3.2"
   },
   "engines": {
