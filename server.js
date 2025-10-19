@@ -1,7 +1,7 @@
-// -------------------------
-// Solana Signal Backend
-// Firebase + Raydium/Orca Tight Parsing (Lite Version)
-// -------------------------
+// ------------------------------------------------------------
+// Solana Signal Backend v2
+// Firebase + Raydium/Orca Tight Parsing (Browser Header Spoof)
+// ------------------------------------------------------------
 
 import express from "express";
 import admin from "firebase-admin";
@@ -16,9 +16,9 @@ const port = process.env.PORT || 10000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// -------------------------
+// ------------------------------------------------------------
 // Initialize Firebase Admin
-// -------------------------
+// ------------------------------------------------------------
 try {
   const serviceAccountPath =
     process.env.GOOGLE_APPLICATION_CREDENTIALS ||
@@ -33,9 +33,9 @@ try {
   console.error("❌ Firebase Admin init failed:", error);
 }
 
-// -------------------------
-// Default endpoint
-// -------------------------
+// ------------------------------------------------------------
+// Default root endpoint
+// ------------------------------------------------------------
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -43,38 +43,74 @@ app.get("/", (req, res) => {
   });
 });
 
-// -------------------------
-// Simplified liquidity-check
-// -------------------------
+// ------------------------------------------------------------
+// Liquidity-check with browser-style headers
+// ------------------------------------------------------------
 app.get("/liquidity-check", async (req, res) => {
-  console.log("🧠 Running simplified liquidity-check...");
+  console.log("🧠 Running browser-header liquidity-check...");
 
   try {
-    // Raydium pairs only — lightweight fetch for Render free plan
-    const raydiumRes = await fetch("https://api.raydium.io/pairs");
-    const data = await raydiumRes.json();
+    // Browser-style headers (bypass Cloudflare / API restrictions)
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      Accept: "application/json",
+    };
 
-    const pairCount = Object.keys(data).length;
+    // Parallel fetch from both Raydium and Orca
+    const [raydiumRes, orcaRes] = await Promise.allSettled([
+      fetch("https://api.raydium.io/pairs", { headers }),
+      fetch("https://api.mainnet.orca.so/allPools", { headers }),
+    ]);
 
-    console.log(`✅ Retrieved ${pairCount} Raydium pairs`);
+    let raydiumPairs = 0;
+    let orcaPools = 0;
+
+    if (raydiumRes.status === "fulfilled") {
+      try {
+        const rayJson = await raydiumRes.value.json();
+        raydiumPairs = Object.keys(rayJson || {}).length;
+      } catch (err) {
+        console.warn("⚠️ Raydium JSON parse error");
+      }
+    } else {
+      console.warn("⚠️ Raydium fetch failed");
+    }
+
+    if (orcaRes.status === "fulfilled") {
+      try {
+        const orcaJson = await orcaRes.value.json();
+        orcaPools = orcaJson?.pools
+          ? Object.keys(orcaJson.pools).length
+          : Object.keys(orcaJson || {}).length;
+      } catch (err) {
+        console.warn("⚠️ Orca JSON parse error");
+      }
+    } else {
+      console.warn("⚠️ Orca fetch failed");
+    }
+
+    console.log(`✅ Raydium: ${raydiumPairs} pairs | Orca: ${orcaPools} pools`);
+
     res.json({
       ok: true,
-      raydiumPairs: pairCount,
-      msg: "Raydium liquidity check complete",
+      raydiumPairs,
+      orcaPools,
+      msg: "Browser-header liquidity check successful",
     });
   } catch (error) {
-    console.error("❌ Error fetching Raydium pairs:", error);
+    console.error("❌ Liquidity-check failed:", error);
     res.status(500).json({
       ok: false,
-      msg: "Error fetching Raydium data",
+      msg: "Error fetching liquidity data",
     });
   }
 });
 
-// -------------------------
-// Start server
-// -------------------------
+// ------------------------------------------------------------
+// Start Express server
+// ------------------------------------------------------------
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
-  console.log("🔥 Solana Signal Watcher (Raydium/Orca tight parsing)");
+  console.log("🔥 Solana Signal Watcher (Raydium/Orca tight parsing v2)");
 });
