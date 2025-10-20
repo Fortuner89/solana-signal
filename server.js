@@ -54,7 +54,7 @@ async function safeFetch(url, label, opts = {}, timeoutMs = 4000) {
 
 // ---------------- Sources ----------------
 const RAYDIUM_SOURCES = [
-  "https://api.dexscreener.io/latest/dex/search?q=SOL",
+  "https://api.dexscreener.io/latest/dex/pairs/solana",
   "https://public-api.birdeye.so/public/market/overview?sort_by=volume_24h&sort_type=desc&offset=0&limit=50",
 ];
 const ORCA_SOURCE = "https://api.mainnet.orca.so/allPools";
