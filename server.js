@@ -1,6 +1,6 @@
 // ===========================================================
-// 🔥 Solana Signal Watcher v5.3.1 — Stable Mode
-// Render-safe polling + tighter memory + fast port bind
+// 🔥 Solana Signal Watcher v5.3.2 — Working API Patch
+// DexScreener + BirdEye updated endpoints (Oct 2025)
 // ===========================================================
 
 import express from "express";
@@ -11,7 +11,6 @@ import { fileURLToPath } from "url";
 
 const app = express();
 const port = process.env.PORT || 10000;
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -31,7 +30,7 @@ try {
 let CACHE = {
   tokenCount: 0,
   lastPoll: null,
-  activeSource: "Raydium",
+  activeSource: "DexScreener",
   backupUsed: false,
 };
 let isPolling = false;
@@ -53,61 +52,67 @@ async function safeFetch(url, label, opts = {}, timeoutMs = 4000) {
 }
 
 // ---------------- Sources ----------------
-const RAYDIUM_SOURCES = [
-  "https://api.dexscreener.io/latest/dex/pairs/solana",
-  "https://public-api.birdeye.so/public/market/overview?sort_by=volume_24h&sort_type=desc&offset=0&limit=50",
-];
-const ORCA_SOURCE = "https://api.mainnet.orca.so/allPools";
+// DexScreener (official unified endpoint for Solana)
+const DEXSCREENER_SOLANA =
+  "https://api.dexscreener.com/latest/dex/tokens/solana";
+
+// BirdEye (current public Solana markets endpoint)
+const BIRDEYE_SOLANA =
+  "https://public-api.birdeye.so/defi/market_overview?chain=solana&sort_by=volume_24h&sort_type=desc&offset=0&limit=50";
+
 const BIRD_HEADER = {
   headers: { "X-API-KEY": "public_bird_key_9eac43b09ab54192b" },
 };
 
+// Orca remains same
+const ORCA_SOURCE = "https://api.mainnet.orca.so/allPools";
+
 // ---------------- Poll Logic ----------------
 async function pollOnce() {
-  if (isPolling) return; // prevent overlap
+  if (isPolling) return;
   isPolling = true;
 
   console.log("🔁 Polling DEX sources...");
-  let result = null;
-  let src = "";
+  let activeSource = "";
+  let totalTokens = 0;
 
-  for (const url of RAYDIUM_SOURCES) {
-    const isBird = url.includes("birdeye");
-    const r = await safeFetch(url, url, isBird ? BIRD_HEADER : {});
-    if (r.ok && r.data) {
-      result = r;
-      src = url;
-      break;
+  // DexScreener primary
+  const dex = await safeFetch(DEXSCREENER_SOLANA, "DexScreener SOL", {}, 5000);
+  if (dex.ok) {
+    totalTokens = Array.isArray(dex.data.pairs) ? dex.data.pairs.length : 0;
+    activeSource = DEXSCREENER_SOLANA;
+  } else {
+    // BirdEye backup
+    const bird = await safeFetch(BIRDEYE_SOLANA, "BirdEye SOL", BIRD_HEADER, 5000);
+    if (bird.ok) {
+      totalTokens = bird.data?.data?.length || 0;
+      activeSource = BIRDEYE_SOLANA;
     }
   }
 
-  const orca = await safeFetch(ORCA_SOURCE, "Orca");
-  const count =
-    (result?.data?.length || 0) + (orca?.data?.length || 0);
+  // Orca optional
+  const orca = await safeFetch(ORCA_SOURCE, "Orca", {}, 5000);
 
   CACHE = {
-    tokenCount: count,
+    tokenCount: totalTokens + (orca.data?.length || 0),
     lastPoll: new Date().toISOString(),
-    activeSource: src || "All failed",
-    backupUsed: src !== RAYDIUM_SOURCES[0],
+    activeSource: activeSource || "All failed",
+    backupUsed: activeSource.includes("birdeye"),
   };
 
-  console.log(
-    `📊 Poll complete | Tokens: ${count} | Source: ${CACHE.activeSource}`
-  );
-
+  console.log(`📊 Poll complete | Tokens: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`);
   isPolling = false;
 }
 
 // ---------------- Scheduler ----------------
 pollOnce();
-setInterval(pollOnce, 1000 * 60 * 5); // every 5 min
+setInterval(pollOnce, 1000 * 60 * 5); // every 5 minutes
 
 // ---------------- Routes ----------------
 app.get("/", (_, res) =>
   res.json({
     ok: true,
-    msg: "🔥 Solana Signal Watcher v5.3.1 (Stable Mode)",
+    msg: "🔥 Solana Signal Watcher v5.3.2 (DexScreener + BirdEye patch)",
     cache: CACHE,
   })
 );
@@ -122,7 +127,8 @@ app.get("/liquidity-check", (_, res) =>
   })
 );
 
+// ---------------- Start ----------------
 app.listen(port, () => {
   console.log(`🚀 Port ${port} ready`);
-  console.log("🔥 Solana Signal Watcher v5.3.1 — Render Stable");
+  console.log("🔥 Solana Signal Watcher v5.3.2 — Working APIs ✅");
 });
