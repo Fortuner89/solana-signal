@@ -1,7 +1,7 @@
-// ===============================================================
-// 🔥 Solana Signal Watcher v5.3
-// Raydium/Orca Parsing + Win-Rate MVP + Fixed API Endpoints
-// ===============================================================
+// ===========================================================
+// 🔥 Solana Signal Watcher v5.3.1 — Stable Mode
+// Render-safe polling + tighter memory + fast port bind
+// ===========================================================
 
 import express from "express";
 import fetch from "node-fetch";
@@ -12,120 +12,117 @@ import { fileURLToPath } from "url";
 const app = express();
 const port = process.env.PORT || 10000;
 
-// -------------------- Paths --------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// -------------------- Firebase --------------------
+// ---------------- Firebase ----------------
 try {
-  const serviceAccountPath =
+  const keyPath =
     process.env.GOOGLE_APPLICATION_CREDENTIALS ||
     "/etc/secrets/solanasignal-51547-firebase-adminsdk-fbsvc-76bfa673ed.json";
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccountPath),
-  });
+  admin.initializeApp({ credential: admin.credential.cert(keyPath) });
   console.log("✅ Firebase Admin initialized (applicationDefault)");
-} catch (error) {
-  console.error("❌ Firebase init failed:", error.message);
+} catch (err) {
+  console.log("⚠️ Firebase init failed:", err.message);
 }
 
-// -------------------- Cache --------------------
+// ---------------- Cache ----------------
 let CACHE = {
   tokenCount: 0,
   lastPoll: null,
-  activeSource: "Raydium Primary",
+  activeSource: "Raydium",
   backupUsed: false,
 };
+let isPolling = false;
 
-// -------------------- Fetch Helper --------------------
-async function fetchJSON(url, label, timeoutMs = 5000) {
+// ---------------- Fetch Helper ----------------
+async function safeFetch(url, label, opts = {}, timeoutMs = 4000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal, ...opts });
     clearTimeout(timeout);
-    if (!res.ok) throw new Error(`${label} → status ${res.status}`);
+    if (!res.ok) throw new Error(`${label} → ${res.status}`);
     const data = await res.json();
     return { ok: true, data };
-  } catch (err) {
-    console.log(`⚠️ ${label} failed: ${err.message}`);
-    return { ok: false, error: err.message };
+  } catch (e) {
+    console.log(`⚠️ ${label} failed: ${e.message}`);
+    return { ok: false, error: e.message };
   }
 }
 
-// -------------------- API Sources --------------------
-// Updated endpoints for stability
-const SOURCES = {
-  raydium: [
-    "https://api.raydium.io/v2/main/pairs",
-    "https://api.dexscreener.com/latest/dex/search?q=solana",
-    "https://public-api.birdeye.so/defi/tokenlist?sort_by=volume_24h&limit=200",
-  ],
-  orca: ["https://api.mainnet.orca.so/allPools"],
+// ---------------- Sources ----------------
+const RAYDIUM_SOURCES = [
+  "https://api.dexscreener.io/latest/dex/search?q=SOL",
+  "https://public-api.birdeye.so/public/market/overview?sort_by=volume_24h&sort_type=desc&offset=0&limit=50",
+];
+const ORCA_SOURCE = "https://api.mainnet.orca.so/allPools";
+const BIRD_HEADER = {
+  headers: { "X-API-KEY": "public_bird_key_9eac43b09ab54192b" },
 };
 
-// -------------------- Poller --------------------
-async function pollDEX() {
-  console.log("🔁 Polling Raydium/Orca sources...");
-  let raydiumResult = { ok: false };
-  let sourceUsed = "";
+// ---------------- Poll Logic ----------------
+async function pollOnce() {
+  if (isPolling) return; // prevent overlap
+  isPolling = true;
 
-  for (let url of SOURCES.raydium) {
-    const result = await fetchJSON(url, `Raydium source: ${url}`, 4000);
-    if (result.ok && result.data) {
-      raydiumResult = result;
-      sourceUsed = url;
+  console.log("🔁 Polling DEX sources...");
+  let result = null;
+  let src = "";
+
+  for (const url of RAYDIUM_SOURCES) {
+    const isBird = url.includes("birdeye");
+    const r = await safeFetch(url, url, isBird ? BIRD_HEADER : {});
+    if (r.ok && r.data) {
+      result = r;
+      src = url;
       break;
     }
   }
 
-  const orcaResult = await fetchJSON(SOURCES.orca[0], "Orca", 5000);
+  const orca = await safeFetch(ORCA_SOURCE, "Orca");
+  const count =
+    (result?.data?.length || 0) + (orca?.data?.length || 0);
 
-  CACHE.lastPoll = new Date().toISOString();
-  CACHE.activeSource = sourceUsed || "All Raydium sources failed";
-  CACHE.backupUsed = sourceUsed !== SOURCES.raydium[0];
-  CACHE.tokenCount =
-    (raydiumResult.data?.length || 0) + (orcaResult.data?.length || 0);
+  CACHE = {
+    tokenCount: count,
+    lastPoll: new Date().toISOString(),
+    activeSource: src || "All failed",
+    backupUsed: src !== RAYDIUM_SOURCES[0],
+  };
 
   console.log(
-    `📊 Poll result | Tokens: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`
+    `📊 Poll complete | Tokens: ${count} | Source: ${CACHE.activeSource}`
   );
+
+  isPolling = false;
 }
 
-// -------------------- Scheduler --------------------
-pollDEX();
-setInterval(pollDEX, 1000 * 60 * 5); // every 5 minutes
+// ---------------- Scheduler ----------------
+pollOnce();
+setInterval(pollOnce, 1000 * 60 * 5); // every 5 min
 
-// -------------------- Routes --------------------
-app.get("/", (req, res) => {
+// ---------------- Routes ----------------
+app.get("/", (_, res) =>
   res.json({
     ok: true,
-    msg: "🔥 Solana Signal Watcher v5.3 (Updated APIs)",
+    msg: "🔥 Solana Signal Watcher v5.3.1 (Stable Mode)",
     cache: CACHE,
-  });
-});
+  })
+);
 
-app.get("/liquidity-check", (req, res) => {
+app.get("/liquidity-check", (_, res) =>
   res.json({
     ok: true,
-    msg: "Liquidity check (summary mode)",
+    msg: "Liquidity summary",
     source: CACHE.activeSource,
-    cache: CACHE,
-  });
-});
+    tokens: CACHE.tokenCount,
+    lastPoll: CACHE.lastPoll,
+  })
+);
 
-app.get("/wallet-stats", (req, res) => {
-  res.json({
-    ok: true,
-    msg: "Wallet analyzer active",
-    winRateThreshold: "95%",
-    adjustable: true,
-  });
-});
-
-// -------------------- Startup --------------------
 app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
-  console.log("🔥 Solana Signal Watcher (Raydium/Orca parsing v5.3)");
+  console.log(`🚀 Port ${port} ready`);
+  console.log("🔥 Solana Signal Watcher v5.3.1 — Render Stable");
 });
