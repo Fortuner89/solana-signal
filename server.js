@@ -1,6 +1,6 @@
 // ===========================================================
-// 🔥 Solana Signal Watcher v5.3.4 — Multi-source Dex fix
-// Strategy: DexPairs ➜ DexSearch ➜ BirdEye (stable on Render)
+// 🔥 Solana Signal Watcher v5.4 — FCM Notification Layer
+// DexPairs ➜ DexSearch ➜ BirdEye + Push Alerts
 // ===========================================================
 
 import express from "express";
@@ -34,18 +34,14 @@ let CACHE = {
   backupUsed: false,
 };
 let isPolling = false;
+let lastAlertTime = 0;
 
 // ---------------- Helpers ----------------
-async function safeFetch(url, label, opts = {}, timeoutMs = 5000) {
+async function safeFetch(url, label, opts = {}, timeoutMs = 6000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      // Some providers check UA; sending a generic JSON UA helps:
-      headers: { "accept": "application/json", ...(opts.headers || {}) },
-      ...opts,
-    });
+    const res = await fetch(url, { signal: controller.signal, ...opts });
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`${label} → ${res.status}`);
     const data = await res.json();
@@ -57,21 +53,16 @@ async function safeFetch(url, label, opts = {}, timeoutMs = 5000) {
 }
 
 // ---------------- Sources ----------------
-// 1) Preferred — fast & complete
 const DS_PAIRS = "https://api.dexscreener.com/latest/dex/pairs/solana";
-// 2) Backup path — returns pairs of recent SOL-related searches
 const DS_SEARCH = "https://api.dexscreener.com/latest/dex/search?q=SOL";
-// 3) BirdEye — stable backup
 const BIRDEYE_SOLANA =
   "https://public-api.birdeye.so/defi/market_overview?chain=solana&sort_by=volume_24h&sort_type=desc&offset=0&limit=50";
 const BIRD_HEADER = {
   headers: { "X-API-KEY": "public_bird_key_9eac43b09ab54192b" },
 };
-
-// Optional Orca
 const ORCA_SOURCE = "https://api.mainnet.orca.so/allPools";
 
-// ---------------- Poll logic ----------------
+// ---------------- Poll ----------------
 async function pollOnce() {
   if (isPolling) return;
   isPolling = true;
@@ -80,8 +71,8 @@ async function pollOnce() {
   let activeSource = "";
   let totalTokens = 0;
 
-  // --- Try DexPairs first ---
-  const dexPairs = await safeFetch(DS_PAIRS, "DexPairs", {}, 6000);
+  // Try DexPairs
+  const dexPairs = await safeFetch(DS_PAIRS, "DexPairs");
   if (dexPairs.ok) {
     const count = Array.isArray(dexPairs.data?.pairs)
       ? dexPairs.data.pairs.length
@@ -92,9 +83,9 @@ async function pollOnce() {
     }
   }
 
-  // --- If empty/fail, try DexSearch ---
+  // Try DexSearch
   if (!activeSource) {
-    const dexSearch = await safeFetch(DS_SEARCH, "DexSearch", {}, 6000);
+    const dexSearch = await safeFetch(DS_SEARCH, "DexSearch");
     if (dexSearch.ok) {
       const count = Array.isArray(dexSearch.data?.pairs)
         ? dexSearch.data.pairs.length
@@ -106,17 +97,17 @@ async function pollOnce() {
     }
   }
 
-  // --- If still nothing, fallback to BirdEye ---
+  // BirdEye backup
   if (!activeSource) {
-    const bird = await safeFetch(BIRDEYE_SOLANA, "BirdEye", BIRD_HEADER, 6000);
+    const bird = await safeFetch(BIRDEYE_SOLANA, "BirdEye", BIRD_HEADER);
     if (bird.ok) {
       totalTokens = bird.data?.data?.length || 0;
       activeSource = "BirdEye";
     }
   }
 
-  // Optional: merge Orca count
-  const orca = await safeFetch(ORCA_SOURCE, "Orca", {}, 5000);
+  // Orca optional
+  const orca = await safeFetch(ORCA_SOURCE, "Orca");
   const orcaCount = Array.isArray(orca.data) ? orca.data.length : 0;
 
   CACHE = {
@@ -129,24 +120,52 @@ async function pollOnce() {
   console.log(
     `📊 Poll complete | Tokens: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`
   );
-
+  await evaluateAndNotify();
   isPolling = false;
 }
 
-// First poll and schedule
+// ---------------- Smart Alert Logic ----------------
+async function evaluateAndNotify() {
+  const now = Date.now();
+
+  // Notify on data loss or recovery
+  if (CACHE.tokenCount === 0 && now - lastAlertTime > 15 * 60 * 1000) {
+    await pushNotify(
+      "🚨 Liquidity Alert",
+      "No tokens detected for 15 minutes — check Dex APIs."
+    );
+    lastAlertTime = now;
+  } else if (CACHE.tokenCount > 0 && now - lastAlertTime > 60 * 60 * 1000) {
+    await pushNotify(
+      "✅ Solana Signal Stable",
+      `${CACHE.tokenCount} tokens tracked from ${CACHE.activeSource}.`
+    );
+    lastAlertTime = now;
+  }
+}
+
+// ---------------- Firebase Push ----------------
+async function pushNotify(title, body) {
+  try {
+    const msg = {
+      notification: { title, body },
+      topic: "solana-signal",
+    };
+    await admin.messaging().send(msg);
+    console.log(`📨 Push sent: ${title}`);
+  } catch (e) {
+    console.log("⚠️ Push failed:", e.message);
+  }
+}
+
+// ---------------- Scheduler ----------------
 pollOnce();
 setInterval(pollOnce, 1000 * 60 * 5);
 
 // ---------------- Routes ----------------
 app.get("/", (_, res) =>
-  res.json({
-    ok: true,
-    msg: "🔥 Solana Signal Watcher v5.3.4",
-    cache: CACHE,
-  })
+  res.json({ ok: true, msg: "🔥 Solana Signal Watcher v5.4 (FCM Alerts)", cache: CACHE })
 );
-
-// Full JSON view
 app.get("/liquidity-check", (_, res) =>
   res.json({
     ok: true,
@@ -156,23 +175,17 @@ app.get("/liquidity-check", (_, res) =>
     lastPoll: CACHE.lastPoll,
   })
 );
-
-// ✅ Compact mobile status
 app.get("/status", (_, res) => {
   const ageMins = CACHE.lastPoll
     ? Math.floor((Date.now() - new Date(CACHE.lastPoll)) / 60000)
     : "N/A";
-  const src =
-    CACHE.activeSource === "DexPairs"
-      ? "DexPairs"
-      : CACHE.activeSource === "DexSearch"
-      ? "DexSearch"
-      : CACHE.activeSource;
-  res.send(`✅ v5.3.4 | ${src} | ${CACHE.tokenCount} tokens | ${ageMins} min ago`);
+  res.send(
+    `✅ v5.4 | ${CACHE.activeSource} | ${CACHE.tokenCount} tokens | ${ageMins} min ago`
+  );
 });
 
-// Start
+// ---------------- Start ----------------
 app.listen(port, () => {
   console.log(`🚀 Port ${port} ready`);
-  console.log("🔥 Solana Signal Watcher v5.3.4 — Multi-source Dex ✅");
+  console.log("🔥 Solana Signal Watcher v5.4 — Render + FCM Alerts ✅");
 });
