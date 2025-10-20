@@ -1,6 +1,6 @@
 // ===============================================================
-// 🔥 Solana Signal Watcher v5.1
-// Tight Raydium/Orca Parsing + Win-Rate MVP + Auto Backup Sources
+// 🔥 Solana Signal Watcher v5.3
+// Raydium/Orca Parsing + Win-Rate MVP + Fixed API Endpoints
 // ===============================================================
 
 import express from "express";
@@ -12,7 +12,7 @@ import { fileURLToPath } from "url";
 const app = express();
 const port = process.env.PORT || 10000;
 
-// -------------------- File setup --------------------
+// -------------------- Paths --------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -30,7 +30,7 @@ try {
   console.error("❌ Firebase init failed:", error.message);
 }
 
-// -------------------- Memory cache --------------------
+// -------------------- Cache --------------------
 let CACHE = {
   tokenCount: 0,
   lastPoll: null,
@@ -38,38 +38,41 @@ let CACHE = {
   backupUsed: false,
 };
 
-// -------------------- Fetch helpers --------------------
-async function fetchJSON(url, label) {
+// -------------------- Fetch Helper --------------------
+async function fetchJSON(url, label, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { timeout: 10000 });
-    if (!res.ok) throw new Error(`${label} status ${res.status}`);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`${label} → status ${res.status}`);
     const data = await res.json();
     return { ok: true, data };
   } catch (err) {
-    console.log(`⚠️ ${label} error: ${err.message}`);
+    console.log(`⚠️ ${label} failed: ${err.message}`);
     return { ok: false, error: err.message };
   }
 }
 
-// -------------------- API sources --------------------
+// -------------------- API Sources --------------------
+// Updated endpoints for stability
 const SOURCES = {
   raydium: [
-    "https://api.raydium.io/pairs", // Primary
-    "https://api.dexscreener.io/latest/dex/pairs/solana", // Backup #1
-    "https://public-api.birdeye.so/public/market/overview?sort_by=volume_24h&sort_type=desc&offset=0&limit=100", // Backup #2
+    "https://api.raydium.io/v2/main/pairs",
+    "https://api.dexscreener.com/latest/dex/search?q=solana",
+    "https://public-api.birdeye.so/defi/tokenlist?sort_by=volume_24h&limit=200",
   ],
   orca: ["https://api.mainnet.orca.so/allPools"],
 };
 
 // -------------------- Poller --------------------
 async function pollDEX() {
-  console.log("🔁 Polling Raydium/Orca (summary mode)...");
+  console.log("🔁 Polling Raydium/Orca sources...");
   let raydiumResult = { ok: false };
   let sourceUsed = "";
 
-  // Try each Raydium endpoint
   for (let url of SOURCES.raydium) {
-    const result = await fetchJSON(url, `Raydium source: ${url}`);
+    const result = await fetchJSON(url, `Raydium source: ${url}`, 4000);
     if (result.ok && result.data) {
       raydiumResult = result;
       sourceUsed = url;
@@ -77,59 +80,52 @@ async function pollDEX() {
     }
   }
 
-  const orcaResult = await fetchJSON(SOURCES.orca[0], "Orca");
+  const orcaResult = await fetchJSON(SOURCES.orca[0], "Orca", 5000);
 
-  // Update cache
   CACHE.lastPoll = new Date().toISOString();
-  CACHE.activeSource = sourceUsed || "All failed";
+  CACHE.activeSource = sourceUsed || "All Raydium sources failed";
   CACHE.backupUsed = sourceUsed !== SOURCES.raydium[0];
   CACHE.tokenCount =
     (raydiumResult.data?.length || 0) + (orcaResult.data?.length || 0);
 
   console.log(
-    `📊 Poll complete | Tokens found: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`
+    `📊 Poll result | Tokens: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`
   );
 }
 
 // -------------------- Scheduler --------------------
-setInterval(pollDEX, 1000 * 60 * 5); // every 5 minutes
 pollDEX();
+setInterval(pollDEX, 1000 * 60 * 5); // every 5 minutes
 
 // -------------------- Routes --------------------
-
-// Root test
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    msg: "🔥 Solana Signal Watcher (v5.1 Dual Backup Ready)",
+    msg: "🔥 Solana Signal Watcher v5.3 (Updated APIs)",
     cache: CACHE,
   });
 });
 
-// Liquidity check
-app.get("/liquidity-check", async (req, res) => {
+app.get("/liquidity-check", (req, res) => {
   res.json({
     ok: true,
     msg: "Liquidity check (summary mode)",
-    raydium: { ok: true, source: CACHE.activeSource },
+    source: CACHE.activeSource,
     cache: CACHE,
   });
 });
 
-// Wallet stats placeholder (next phase)
 app.get("/wallet-stats", (req, res) => {
   res.json({
     ok: true,
-    msg: "Wallet analyzer active (waiting for first data packet)",
-    sample: {
-      winRateThreshold: "95%",
-      adjustable: true,
-    },
+    msg: "Wallet analyzer active",
+    winRateThreshold: "95%",
+    adjustable: true,
   });
 });
 
 // -------------------- Startup --------------------
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
-  console.log("🔥 Solana Signal Watcher (Raydium/Orca tight parsing v5.1)");
+  console.log("🔥 Solana Signal Watcher (Raydium/Orca parsing v5.3)");
 });
