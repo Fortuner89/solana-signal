@@ -1,6 +1,6 @@
 // ===========================================================
-// 🔥 Solana Signal Watcher v5.3.2 — Working API Patch
-// DexScreener + BirdEye updated endpoints (Oct 2025)
+// 🔥 Solana Signal Watcher v5.3.3 — with Compact Status Endpoint
+// DexScreener + BirdEye (Stable) + /status for mobile view
 // ===========================================================
 
 import express from "express";
@@ -52,11 +52,9 @@ async function safeFetch(url, label, opts = {}, timeoutMs = 4000) {
 }
 
 // ---------------- Sources ----------------
-// DexScreener (official unified endpoint for Solana)
 const DEXSCREENER_SOLANA =
   "https://api.dexscreener.com/latest/dex/tokens/solana";
 
-// BirdEye (current public Solana markets endpoint)
 const BIRDEYE_SOLANA =
   "https://public-api.birdeye.so/defi/market_overview?chain=solana&sort_by=volume_24h&sort_type=desc&offset=0&limit=50";
 
@@ -64,7 +62,6 @@ const BIRD_HEADER = {
   headers: { "X-API-KEY": "public_bird_key_9eac43b09ab54192b" },
 };
 
-// Orca remains same
 const ORCA_SOURCE = "https://api.mainnet.orca.so/allPools";
 
 // ---------------- Poll Logic ----------------
@@ -76,13 +73,13 @@ async function pollOnce() {
   let activeSource = "";
   let totalTokens = 0;
 
-  // DexScreener primary
   const dex = await safeFetch(DEXSCREENER_SOLANA, "DexScreener SOL", {}, 5000);
   if (dex.ok) {
-    totalTokens = Array.isArray(dex.data.pairs) ? dex.data.pairs.length : 0;
+    totalTokens = Array.isArray(dex.data.pairs)
+      ? dex.data.pairs.length
+      : dex.data?.length || 0;
     activeSource = DEXSCREENER_SOLANA;
   } else {
-    // BirdEye backup
     const bird = await safeFetch(BIRDEYE_SOLANA, "BirdEye SOL", BIRD_HEADER, 5000);
     if (bird.ok) {
       totalTokens = bird.data?.data?.length || 0;
@@ -90,7 +87,6 @@ async function pollOnce() {
     }
   }
 
-  // Orca optional
   const orca = await safeFetch(ORCA_SOURCE, "Orca", {}, 5000);
 
   CACHE = {
@@ -100,19 +96,20 @@ async function pollOnce() {
     backupUsed: activeSource.includes("birdeye"),
   };
 
-  console.log(`📊 Poll complete | Tokens: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`);
+  console.log(
+    `📊 Poll complete | Tokens: ${CACHE.tokenCount} | Source: ${CACHE.activeSource}`
+  );
   isPolling = false;
 }
 
-// ---------------- Scheduler ----------------
 pollOnce();
-setInterval(pollOnce, 1000 * 60 * 5); // every 5 minutes
+setInterval(pollOnce, 1000 * 60 * 5); // every 5 min
 
 // ---------------- Routes ----------------
 app.get("/", (_, res) =>
   res.json({
     ok: true,
-    msg: "🔥 Solana Signal Watcher v5.3.2 (DexScreener + BirdEye patch)",
+    msg: "🔥 Solana Signal Watcher v5.3.3 (Stable + Status)",
     cache: CACHE,
   })
 );
@@ -127,8 +124,20 @@ app.get("/liquidity-check", (_, res) =>
   })
 );
 
+// 🟢 Compact /status endpoint for mobile / quick check
+app.get("/status", (_, res) => {
+  const last = CACHE.lastPoll
+    ? new Date(CACHE.lastPoll).toISOString().replace("T", " ").slice(0, 19)
+    : "No data";
+  const msg = `✅ v5.3.3 | ${CACHE.activeSource.includes("birdeye") ? "BirdEye" : "DexScreener"} | ${
+    CACHE.tokenCount
+  } tokens | Last poll: ${last}`;
+  res.setHeader("Content-Type", "text/plain");
+  res.send(msg);
+});
+
 // ---------------- Start ----------------
 app.listen(port, () => {
   console.log(`🚀 Port ${port} ready`);
-  console.log("🔥 Solana Signal Watcher v5.3.2 — Working APIs ✅");
+  console.log("🔥 Solana Signal Watcher v5.3.3 — Render Stable + Status OK");
 });
